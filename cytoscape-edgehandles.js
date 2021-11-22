@@ -189,14 +189,39 @@ function addCytoscapeListeners() {
     return _this.grabbingNode = false;
   });
 
+  // show handle on hover
+  this.addListener(cy, 'mouseover', 'node', function (e) {
+    _this.show(e.target);
+  });
+
+  // hide handle on tap handle
+  this.addListener(cy, 'tap', 'node', function (e) {
+    var node = e.target;
+
+    if (!node.same(_this.handleNode)) {
+      _this.show(node);
+    }
+  });
+
+  // hide handle when source node moved
+  this.addListener(cy, 'position', 'node', function (e) {
+    if (e.target.same(_this.sourceNode)) {
+      _this.hide();
+    }
+  });
+
   // start on tapstart handle
   // start on tapstart node (draw mode)
   // toggle on source node
   this.addListener(cy, 'tapstart', 'node', function (e) {
     var node = e.target;
 
-    if (_this.drawMode) {
+    if (node.same(_this.handleNode)) {
+      _this.start(_this.sourceNode);
+    } else if (_this.drawMode) {
       _this.start(node);
+    } else if (node.same(_this.sourceNode)) {
+      _this.hide();
     }
   });
 
@@ -228,6 +253,13 @@ function addCytoscapeListeners() {
     _this.stop();
   });
 
+  // hide handle if source node is removed
+  this.addListener(cy, 'remove', function (e) {
+    if (e.target.same(_this.sourceNode)) {
+      _this.hide();
+    }
+  });
+
   return this;
 }
 
@@ -242,21 +274,80 @@ module.exports = { addCytoscapeListeners: addCytoscapeListeners };
 
 /* eslint-disable no-unused-vars */
 var defaults = {
-  canConnect: function canConnect(sourceNode, targetNode) {
-    // whether an edge can be created between source and target
-    return !sourceNode.same(targetNode); // e.g. disallow loops
-  },
-  edgeParams: function edgeParams(sourceNode, targetNode) {
-    // for edges between the specified source and target
-    // return element object to be passed to cy.add() for edge
-    return {};
-  },
+  preview: true, // whether to show added edges preview before releasing selection
   hoverDelay: 150, // time spent hovering over a target node before it is considered selected
-  snap: true, // when enabled, the edge can be drawn by just moving close to a target node (can be confusing on compound graphs)
+  handleNodes: 'node', // selector/filter function for whether edges can be made from a given node
+  snap: false, // when enabled, the edge can be drawn by just moving close to a target node (can be confusing on compound graphs)
   snapThreshold: 50, // the target node must be less than or equal to this many pixels away from the cursor/finger
   snapFrequency: 15, // the number of times per second (Hz) that snap checks done (lower is less expensive)
-  noEdgeEventsInDraw: true, // set events:no to edges during draws, prevents mouseouts on compounds
-  disableBrowserGestures: true // during an edge drawing gesture, disable browser gestures such as two-finger trackpad swipe and pinch-to-zoom
+  noEdgeEventsInDraw: false, // set events:no to edges during draws, prevents mouseouts on compounds
+  disableBrowserGestures: true, // during an edge drawing gesture, disable browser gestures such as two-finger trackpad swipe and pinch-to-zoom
+  handlePosition: function handlePosition(node) {
+    return 'middle top'; // sets the position of the handle in the format of "X-AXIS Y-AXIS" such as "left top", "middle top"
+  },
+  handleInDrawMode: false, // whether to show the handle in draw mode
+  edgeType: function edgeType(sourceNode, targetNode) {
+    // can return 'flat' for flat edges between nodes or 'node' for intermediate node between them
+    // returning null/undefined means an edge can't be added between the two nodes
+    return 'flat';
+  },
+  loopAllowed: function loopAllowed(node) {
+    // for the specified node, return whether edges from itself to itself are allowed
+    return false;
+  },
+  nodeLoopOffset: -50, // offset for edgeType: 'node' loops
+  nodeParams: function nodeParams(sourceNode, targetNode) {
+    // for edges between the specified source and target
+    // return element object to be passed to cy.add() for intermediary node
+    return {};
+  },
+  edgeParams: function edgeParams(sourceNode, targetNode, i) {
+    // for edges between the specified source and target
+    // return element object to be passed to cy.add() for edge
+    // NB: i indicates edge index in case of edgeType: 'node'
+    return {};
+  },
+  ghostEdgeParams: function ghostEdgeParams() {
+    // return element object to be passed to cy.add() for the ghost edge
+    // (default classes are always added for you)
+    return {};
+  },
+  show: function show(sourceNode) {
+    // fired when handle is shown
+  },
+  hide: function hide(sourceNode) {
+    // fired when the handle is hidden
+  },
+  start: function start(sourceNode) {
+    // fired when edgehandles interaction starts (drag on handle)
+  },
+  complete: function complete(sourceNode, targetNode, addedEles) {
+    // fired when edgehandles is done and elements are added
+  },
+  stop: function stop(sourceNode) {
+    // fired when edgehandles interaction is stopped (either complete with added edges or incomplete)
+  },
+  cancel: function cancel(sourceNode, cancelledTargets) {
+    // fired when edgehandles are cancelled (incomplete gesture)
+  },
+  hoverover: function hoverover(sourceNode, targetNode) {
+    // fired when a target is hovered
+  },
+  hoverout: function hoverout(sourceNode, targetNode) {
+    // fired when a target isn't hovered anymore
+  },
+  previewon: function previewon(sourceNode, targetNode, previewEles) {
+    // fired when preview is shown
+  },
+  previewoff: function previewoff(sourceNode, targetNode, previewEles) {
+    // fired when preview is hidden
+  },
+  drawon: function drawon() {
+    // fired when draw mode enabled
+  },
+  drawoff: function drawoff() {
+    // fired when draw mode disabled
+  }
 };
 /* eslint-enable */
 
@@ -270,7 +361,8 @@ module.exports = defaults;
 
 
 function toggleDrawMode(bool) {
-  var cy = this.cy;
+  var cy = this.cy,
+      options = this.options;
 
 
   this.drawMode = bool != null ? bool : !this.drawMode;
@@ -279,6 +371,10 @@ function toggleDrawMode(bool) {
     this.prevUngrabifyState = cy.autoungrabify();
 
     cy.autoungrabify(true);
+
+    if (!options.handleInDrawMode && this.handleShown()) {
+      this.hide();
+    }
 
     this.emit('drawon');
   } else {
@@ -350,15 +446,20 @@ function makeEdges() {
   var target = this.targetNode;
   var classes = preview ? 'eh-preview' : '';
   var added = cy.collection();
-  var canConnect = this.canConnect(target);
+  var edgeType = options.edgeType(source, target);
 
   // can't make edges outside of regular gesture lifecycle
   if (!active) {
     return;
   }
 
-  // must be able to connect
-  if (!canConnect) {
+  // must have a non-empty edge type
+  if (!edgeType) {
+    return;
+  }
+
+  // can't make preview if disabled
+  if (preview && !options.preview) {
     return;
   }
 
@@ -372,7 +473,7 @@ function makeEdges() {
   }
 
   // just remove preview class if we already have the edges
-  if (!preview) {
+  if (!preview && options.preview) {
     previewEles.removeClass('eh-preview').style('events', '');
 
     this.emit('complete', this.mp(), source, target, previewEles);
@@ -380,15 +481,57 @@ function makeEdges() {
     return;
   }
 
-  var source2target = cy.add(getEleJson({
-    group: 'edges',
-    data: {
-      source: source.id(),
-      target: target.id()
-    }
-  }, this.edgeParams(target), classes));
+  var p1 = source.position();
+  var p2 = target.position();
 
-  added = added.merge(source2target);
+  var p = void 0;
+  if (source.same(target)) {
+    p = {
+      x: p1.x + options.nodeLoopOffset,
+      y: p1.y + options.nodeLoopOffset
+    };
+  } else {
+    p = {
+      x: (p1.x + p2.x) / 2,
+      y: (p1.y + p2.y) / 2
+    };
+  }
+
+  if (edgeType === 'node') {
+    var interNode = cy.add(getEleJson({
+      group: 'nodes',
+      position: p
+    }, options.nodeParams(source, target), classes));
+
+    var source2inter = cy.add(getEleJson({
+      group: 'edges',
+      data: {
+        source: source.id(),
+        target: interNode.id()
+      }
+    }, options.edgeParams(source, target, 0), classes));
+
+    var inter2target = cy.add(getEleJson({
+      group: 'edges',
+      data: {
+        source: interNode.id(),
+        target: target.id()
+      }
+    }, options.edgeParams(source, target, 1), classes));
+
+    added = added.merge(interNode).merge(source2inter).merge(inter2target);
+  } else {
+    // flat
+    var source2target = cy.add(getEleJson({
+      group: 'edges',
+      data: {
+        source: source.id(),
+        target: target.id()
+      }
+    }, options.edgeParams(source, target, 0), classes));
+
+    added = added.merge(source2target);
+  }
 
   if (preview) {
     this.previewEles = added;
@@ -421,14 +564,85 @@ function removePreview() {
   return this;
 }
 
-function updateEdge() {
+function handleShown() {
+  return this.handleNode.nonempty() && this.handleNode.inside();
+}
+
+function removeHandle() {
+  if (this.handleShown()) {
+    this.handleNode.remove();
+  }
+
+  return this;
+}
+
+function setHandleFor(node) {
   var _this = this;
+
+  var options = this.options,
+      cy = this.cy;
+
+
+  var handlePosition = _typeof(options.handlePosition) === _typeof('') ? function () {
+    return options.handlePosition;
+  } : options.handlePosition;
+
+  var p = node.position();
+  var h = node.outerHeight();
+  var w = node.outerWidth();
+
+  // store how much we should move the handle from origin(p.x, p.y)
+  var moveX = 0;
+  var moveY = 0;
+
+  // grab axes
+  var axes = handlePosition(node).toLowerCase().split(/\s+/);
+  var axisX = axes[0];
+  var axisY = axes[1];
+
+  // based on handlePosition move left/right/top/bottom. Middle/middle will just be normal
+  if (axisX === 'left') {
+    moveX = -(w / 2);
+  } else if (axisX === 'right') {
+    moveX = w / 2;
+  }if (axisY === 'top') {
+    moveY = -(h / 2);
+  } else if (axisY === 'bottom') {
+    moveY = h / 2;
+  }
+
+  // set handle x and y based on adjusted positions
+  var hx = this.hx = p.x + moveX;
+  var hy = this.hy = p.y + moveY;
+  var pos = { x: hx, y: hy };
+
+  if (this.handleShown()) {
+    this.handleNode.position(pos);
+  } else {
+    cy.batch(function () {
+      _this.handleNode = cy.add({
+        classes: 'eh-handle',
+        position: pos,
+        grabbable: false,
+        selectable: false
+      });
+
+      _this.handleNode.style('z-index', 9007199254740991);
+    });
+  }
+
+  return this;
+}
+
+function updateEdge() {
+  var _this2 = this;
 
   var sourceNode = this.sourceNode,
       ghostNode = this.ghostNode,
       cy = this.cy,
       mx = this.mx,
-      my = this.my;
+      my = this.my,
+      options = this.options;
 
   var x = mx;
   var y = my;
@@ -444,7 +658,7 @@ function updateEdge() {
     ghostEles = this.ghostEles = cy.collection();
 
     cy.batch(function () {
-      ghostNode = _this.ghostNode = cy.add({
+      ghostNode = _this2.ghostNode = cy.add({
         group: 'nodes',
         classes: 'eh-ghost eh-ghost-node',
         position: {
@@ -461,7 +675,7 @@ function updateEdge() {
         'events': 'no'
       });
 
-      var ghostEdgeParams = {};
+      var ghostEdgeParams = options.ghostEdgeParams();
 
       ghostEdge = cy.add(assign({}, ghostEdgeParams, {
         group: 'edges',
@@ -487,7 +701,8 @@ function updateEdge() {
 
 module.exports = {
   makeEdges: makeEdges, makePreview: makePreview, removePreview: removePreview, previewShown: previewShown,
-  updateEdge: updateEdge
+  updateEdge: updateEdge,
+  handleShown: handleShown, setHandleFor: setHandleFor, removeHandle: removeHandle
 };
 
 /***/ }),
@@ -551,8 +766,10 @@ var memoize = __webpack_require__(13);
 var sqrt2 = Math.sqrt(2);
 
 function canStartOn(node) {
-  var previewEles = this.previewEles,
-      ghostEles = this.ghostEles;
+  var options = this.options,
+      previewEles = this.previewEles,
+      ghostEles = this.ghostEles,
+      handleNode = this.handleNode;
 
   var isPreview = function isPreview(el) {
     return previewEles.anySame(el);
@@ -560,8 +777,14 @@ function canStartOn(node) {
   var isGhost = function isGhost(el) {
     return ghostEles.anySame(el);
   };
+  var userFilter = function userFilter(el) {
+    return el.filter(options.handleNodes).length > 0;
+  };
+  var isHandle = function isHandle(el) {
+    return handleNode.same(el);
+  };
   var isTemp = function isTemp(el) {
-    return isPreview(el) || isGhost(el);
+    return isPreview(el) || isHandle(el) || isGhost(el);
   };
 
   var enabled = this.enabled,
@@ -569,7 +792,7 @@ function canStartOn(node) {
       grabbingNode = this.grabbingNode;
 
 
-  return enabled && !active && !grabbingNode && node != null && node.nonempty() && !isTemp(node);
+  return enabled && !active && !grabbingNode && (node == null || !isTemp(node) && userFilter(node));
 }
 
 function canStartDrawModeOn(node) {
@@ -580,9 +803,33 @@ function canStartNonDrawModeOn(node) {
   return this.canStartOn(node) && !this.drawMode;
 }
 
-function start(node) {
-  var _this = this;
+function show(node) {
+  var options = this.options,
+      drawMode = this.drawMode;
 
+
+  if (!this.canStartOn(node) || drawMode && !options.handleInDrawMode) {
+    return;
+  }
+
+  this.sourceNode = node;
+
+  this.setHandleFor(node);
+
+  this.emit('show', this.hp(), this.sourceNode);
+
+  return this;
+}
+
+function hide() {
+  this.removeHandle();
+
+  this.emit('hide', this.hp(), this.sourceNode);
+
+  return this;
+}
+
+function start(node) {
   if (!this.canStartOn(node)) {
     return;
   }
@@ -594,18 +841,6 @@ function start(node) {
 
   this.disableGestures();
   this.disableEdgeEvents();
-
-  var getId = function getId(n) {
-    return n.id();
-  };
-
-  this.canConnect = memoize(function (target) {
-    return _this.options.canConnect(_this.sourceNode, target);
-  }, getId);
-
-  this.edgeParams = memoize(function (target) {
-    return _this.options.edgeParams(_this.sourceNode, target);
-  }, getId);
 
   this.emit('start', this.hp(), node);
 }
@@ -635,7 +870,8 @@ function snap() {
   var tgt = this.targetNode;
   var threshold = this.options.snapThreshold;
   var mousePos = this.mp();
-  var previewEles = this.previewEles,
+  var handleNode = this.handleNode,
+      previewEles = this.previewEles,
       ghostNode = this.ghostNode;
 
 
@@ -655,7 +891,7 @@ function snap() {
   var sqThreshold = function sqThreshold(n) {
     var r = radius(n);var t = r + threshold;return t * t;
   };
-  var isWithinThreshold = function isWithinThreshold(n) {
+  var isWithinTheshold = function isWithinTheshold(n) {
     return nodeSqDist(n) <= sqThreshold(n);
   };
 
@@ -733,15 +969,15 @@ function snap() {
   };
 
   var isEhEle = function isEhEle(n) {
-    return n.same(previewEles) || n.same(ghostNode);
+    return n.same(handleNode) || n.same(previewEles) || n.same(ghostNode);
   };
 
   var nodesByDist = cy.nodes(function (n) {
-    return !isEhEle(n) && isWithinThreshold(n);
+    return !isEhEle(n) && isWithinTheshold(n);
   }).sort(cmp);
   var snapped = false;
 
-  if (tgt.nonempty() && !isWithinThreshold(tgt)) {
+  if (tgt.nonempty() && !isWithinTheshold(tgt)) {
     this.unpreview(tgt);
   }
 
@@ -768,7 +1004,7 @@ function snap() {
 }
 
 function preview(target) {
-  var _this2 = this;
+  var _this = this;
 
   var allowHoverDelay = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : true;
   var options = this.options,
@@ -780,11 +1016,14 @@ function preview(target) {
       active = this.active;
 
   var source = sourceNode;
+  var isLoop = target.same(source);
+  var loopAllowed = options.loopAllowed(target);
   var isGhost = target.same(ghostNode);
-  var noEdge = !this.canConnect(target);
+  var noEdge = !options.edgeType(source, target);
+  var isHandle = target.same(this.handleNode);
   var isExistingTgt = target.same(this.targetNode);
 
-  if (!active || isGhost || noEdge || isExistingTgt
+  if (!active || isHandle || isGhost || noEdge || isExistingTgt || isLoop && !loopAllowed
   // || (target.isParent())
   ) {
       return false;
@@ -797,24 +1036,26 @@ function preview(target) {
   clearTimeout(this.previewTimeout);
 
   var applyPreview = function applyPreview() {
-    _this2.targetNode = target;
+    _this.targetNode = target;
 
     presumptiveTargets.merge(target);
 
     target.addClass('eh-presumptive-target');
     target.addClass('eh-target');
 
-    _this2.emit('hoverover', _this2.mp(), source, target);
+    _this.emit('hoverover', _this.mp(), source, target);
 
-    target.addClass('eh-preview');
+    if (options.preview) {
+      target.addClass('eh-preview');
 
-    ghostEles.addClass('eh-preview-active');
-    sourceNode.addClass('eh-preview-active');
-    target.addClass('eh-preview-active');
+      ghostEles.addClass('eh-preview-active');
+      sourceNode.addClass('eh-preview-active');
+      target.addClass('eh-preview-active');
 
-    _this2.makePreview();
+      _this.makePreview();
 
-    _this2.emit('previewon', _this2.mp(), source, target, previewEles);
+      _this.emit('previewon', _this.mp(), source, target, previewEles);
+    }
   };
 
   if (allowHoverDelay && options.hoverDelay > 0) {
@@ -827,7 +1068,7 @@ function preview(target) {
 }
 
 function unpreview(target) {
-  if (!this.active) {
+  if (!this.active || target.same(this.handleNode)) {
     return;
   }
 
@@ -869,11 +1110,13 @@ function stop() {
 
   clearTimeout(this.previewTimeout);
 
-  sourceNode.removeClass('eh-source eh-preview-active');
-  targetNode.removeClass('eh-target eh-preview eh-hover eh-preview-active');
+  sourceNode.removeClass('eh-source');
+  targetNode.removeClass('eh-target eh-preview eh-hover');
   presumptiveTargets.removeClass('eh-presumptive-target');
 
   this.makeEdges();
+
+  this.removeHandle();
 
   ghostEles.remove();
 
@@ -890,7 +1133,7 @@ function stop() {
 }
 
 module.exports = {
-  start: start, update: update, preview: preview, unpreview: unpreview, stop: stop, snap: snap,
+  show: show, hide: hide, start: start, update: update, preview: preview, unpreview: unpreview, stop: stop, snap: snap,
   canStartOn: canStartOn, canStartDrawModeOn: canStartDrawModeOn, canStartNonDrawModeOn: canStartNonDrawModeOn
 };
 
@@ -927,7 +1170,13 @@ function Edgehandles(options) {
   this.grabbingNode = false;
 
   // edgehandles elements
+  this.handleNode = cy.collection();
   this.clearCollections();
+
+  // handle
+  this.hx = 0;
+  this.hy = 0;
+  this.hr = 0;
 
   // mouse position
   this.mx = 0;
@@ -944,11 +1193,6 @@ function Edgehandles(options) {
     return e.preventDefault();
   };
 
-  // disabled until start()
-  this.canConnect = function () {
-    return false;
-  };
-
   var supportsPassive = false;
   try {
     var opts = Object.defineProperty({}, 'passive', {
@@ -958,9 +1202,7 @@ function Edgehandles(options) {
     });
 
     window.addEventListener('test', null, opts);
-  } catch (err) {
-    // swallow
-  }
+  } catch (err) {}
 
   if (supportsPassive) {
     this.windowListenerOptions = { capture: true, passive: false };
@@ -1100,13 +1342,20 @@ function removeListener(target, event, selector, callback, options) {
 }
 
 function emit(type, position) {
-  var cy = this.cy;
+  var options = this.options,
+      cy = this.cy;
 
   for (var _len = arguments.length, args = Array(_len > 2 ? _len - 2 : 0), _key = 2; _key < _len; _key++) {
     args[_key - 2] = arguments[_key];
   }
 
   cy.emit({ type: 'eh' + type, position: position }, args);
+
+  var handler = options[type];
+
+  if (handler != null) {
+    handler.apply(undefined, args);
+  }
 
   return this;
 }
